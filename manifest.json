@@ -1,0 +1,11 @@
+{
+  "id": "wjq-task-hub",
+  "name": "个人工作台",
+  "version": "0.9.57",
+  "minAppVersion": "1.5.0",
+  "description": "A personal Obsidian workbench with a task console sidebar, project-first homepage, project pages, task pages, calendar, flow, gantt, and classified tasks.",
+  "author": "Codex for WJQ",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}
+
