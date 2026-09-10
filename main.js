@@ -17,7 +17,7 @@ const HOME_VIEW_TYPE = "wjq-workbench-home-view";
 const TASK_CENTER_VIEW_TYPE = "wjq-task-center-view";
 const PROJECT_VIEW_TYPE = "wjq-project-page-view";
 const TASK_DETAIL_VIEW_TYPE = "wjq-task-detail-view";
-const PLUGIN_BUILD = "0.9.59";
+const PLUGIN_BUILD = "0.9.60";
 const TASK_WORKSPACE_AUTOSAVE_DELAY_MS = 10000;
 const INTERNAL_TASK_PATH = "__wjq_internal_tasks__";
 const TASK_META_REGEX = /%%wjq-task:(\{.*?\})%%/;
@@ -83,6 +83,7 @@ const DEFAULT_SETTINGS = {
   taskPageFolder: "00 任务总控/任务页",
   projectNoteFolder: "00 任务总控/项目页",
   internalTasks: [],
+  internalTaskDeletedAt: {},
   migratedStandaloneTaskFiles: [],
   legacyTodoStatusMigrated: false,
   todoStatusMigrationVersion: 0,
@@ -446,6 +447,7 @@ class WjqTaskHubPlugin extends Plugin {
     this.settings.archivedProjects = this.settings.archivedProjects || [];
     this.settings.recentOpenedPaths = this.settings.recentOpenedPaths || [];
     this.settings.internalTasks = Array.isArray(this.settings.internalTasks) ? this.settings.internalTasks : [];
+    this.settings.internalTaskDeletedAt = this.settings.internalTaskDeletedAt && typeof this.settings.internalTaskDeletedAt === "object" ? this.settings.internalTaskDeletedAt : {};
     this.settings.migratedStandaloneTaskFiles = Array.isArray(this.settings.migratedStandaloneTaskFiles) ? this.settings.migratedStandaloneTaskFiles : [];
     this.settings.activeStatusNames = uniq((this.settings.activeStatusNames || DEFAULT_SETTINGS.activeStatusNames)
       .map((status) => String(status || "").trim())
@@ -603,9 +605,12 @@ class WjqTaskHubPlugin extends Plugin {
     try {
       const raw = await this.app.vault.adapter.read(path);
       const data = JSON.parse(raw);
-      return Array.isArray(data.internalTasks) ? data.internalTasks.map((item) => this.normalizeInternalTaskMetadata(item)) : null;
+      if (!Array.isArray(data.internalTasks)) return null;
+      return {
+        tasks: data.internalTasks.map((item) => this.normalizeInternalTaskMetadata(item)),
+        deletedAt: data.internalTaskDeletedAt && typeof data.internalTaskDeletedAt === "object" ? data.internalTaskDeletedAt : {},
+      };
     } catch (error) {
-      // 同步插件在替换 data.json 的瞬间可能读到半个文件；下一轮再尝试即可。
       return null;
     }
   }
@@ -614,39 +619,40 @@ class WjqTaskHubPlugin extends Plugin {
     if (this.internalTaskSyncReading) return;
     this.internalTaskSyncReading = true;
     try {
-      const remoteTasks = await this.readInternalTasksFromDisk();
+      const remoteState = await this.readInternalTasksFromDisk();
       this.internalTaskSyncLastCheckedAt = Date.now();
-      if (!remoteTasks) return;
+      if (!remoteState) return;
       const localTasks = Array.isArray(this.settings.internalTasks) ? this.settings.internalTasks.map((item) => this.normalizeInternalTaskMetadata(item)) : [];
-      if (taskSnapshotSignature(remoteTasks) === taskSnapshotSignature(localTasks)) {
-        this.captureInternalTaskSyncBaseline(remoteTasks);
-        return;
-      }
-      const baseline = this.internalTaskSyncBaseline || new Map();
+      const localDeletedAt = this.settings.internalTaskDeletedAt && typeof this.settings.internalTaskDeletedAt === "object" ? this.settings.internalTaskDeletedAt : {};
+      const remoteTasks = remoteState.tasks;
+      const remoteDeletedAt = remoteState.deletedAt;
       const localById = new Map(localTasks.map((item) => [item.id, item]));
       const remoteById = new Map(remoteTasks.map((item) => [item.id, item]));
-      const ids = uniq([...remoteTasks.map((item) => item.id), ...localTasks.map((item) => item.id)]);
+      const ids = uniq([...localById.keys(), ...remoteById.keys(), ...Object.keys(localDeletedAt), ...Object.keys(remoteDeletedAt)]);
       const merged = [];
+      const mergedDeletedAt = {};
       for (const id of ids) {
         const local = localById.get(id);
         const remote = remoteById.get(id);
-        if (!local) { merged.push(remote); continue; }
-        if (!remote) { merged.push(local); continue; }
-        const base = baseline.get(id) || "";
-        const localChanged = JSON.stringify(local) !== base;
-        const remoteChanged = JSON.stringify(remote) !== base;
-        if (remoteChanged && !localChanged) { merged.push(remote); continue; }
-        if (localChanged && !remoteChanged) { merged.push(local); continue; }
-        if (!localChanged && !remoteChanged) { merged.push(local); continue; }
-        // 同一任务两端都改过时，采用带更新时间的一方；旧版本没有时间戳时优先采用刚同步到磁盘的一方。
-        merged.push(taskUpdateTime(remote) >= taskUpdateTime(local) ? remote : local);
+        const newestTask = !local ? remote : !remote ? local : (taskUpdateTime(remote) >= taskUpdateTime(local) ? remote : local);
+        const localDelete = Date.parse(String(localDeletedAt[id] || "")) || 0;
+        const remoteDelete = Date.parse(String(remoteDeletedAt[id] || "")) || 0;
+        const deletedAt = Math.max(localDelete, remoteDelete);
+        if (deletedAt && (!newestTask || deletedAt >= taskUpdateTime(newestTask))) {
+          mergedDeletedAt[id] = new Date(deletedAt).toISOString();
+          continue;
+        }
+        if (newestTask) merged.push(newestTask);
       }
-      if (taskSnapshotSignature(merged) !== taskSnapshotSignature(localTasks)) {
+      const tasksChanged = taskSnapshotSignature(merged) !== taskSnapshotSignature(localTasks);
+      const deletionsChanged = JSON.stringify(mergedDeletedAt) !== JSON.stringify(localDeletedAt);
+      if (tasksChanged || deletionsChanged) {
         this.settings.internalTasks = merged;
+        this.settings.internalTaskDeletedAt = mergedDeletedAt;
         this.captureInternalTaskSyncBaseline(merged);
         await this.saveData(this.settings);
         await this.refreshViews();
-        new Notice("个人工作台：已合并另一台设备的任务更新");
+        new Notice("个人工作台：已同步另一台设备的任务更新");
       } else {
         this.captureInternalTaskSyncBaseline(remoteTasks);
       }
@@ -1820,6 +1826,8 @@ class WjqTaskHubPlugin extends Plugin {
     if (task.internal) {
       const id = task.taskId || "";
       this.settings.internalTasks = (this.settings.internalTasks || []).filter((item) => item && item.id !== id);
+      this.settings.internalTaskDeletedAt = this.settings.internalTaskDeletedAt && typeof this.settings.internalTaskDeletedAt === "object" ? this.settings.internalTaskDeletedAt : {};
+      if (id) this.settings.internalTaskDeletedAt[id] = new Date().toISOString();
       if (id) await this.removeDeletedTaskReferences(id);
       if (this.settings.currentTaskId === id) this.settings.currentTaskId = "";
       if (this.settings.currentFullTaskId === id) this.settings.currentFullTaskId = "";
