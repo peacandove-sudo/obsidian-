@@ -17,7 +17,7 @@ const HOME_VIEW_TYPE = "wjq-workbench-home-view";
 const TASK_CENTER_VIEW_TYPE = "wjq-task-center-view";
 const PROJECT_VIEW_TYPE = "wjq-project-page-view";
 const TASK_DETAIL_VIEW_TYPE = "wjq-task-detail-view";
-const PLUGIN_BUILD = "0.9.58";
+const PLUGIN_BUILD = "0.9.59";
 const TASK_WORKSPACE_AUTOSAVE_DELAY_MS = 10000;
 const INTERNAL_TASK_PATH = "__wjq_internal_tasks__";
 const TASK_META_REGEX = /%%wjq-task:(\{.*?\})%%/;
@@ -10189,4 +10189,3 @@ class TaskHubSettingTab extends PluginSettingTab {
 }
 
 module.exports = WjqTaskHubPlugin;
-
