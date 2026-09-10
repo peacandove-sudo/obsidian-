@@ -1,0 +1,28 @@
+name: Publish Obsidian plugin
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - main.js
+      - manifest.json
+      - styles.css
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create matching release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(node -p "require('./manifest.json').version")"
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "Release $VERSION already exists."
+          else
+            gh release create "$VERSION" main.js manifest.json styles.css --title "$VERSION" --generate-notes
+          fi
