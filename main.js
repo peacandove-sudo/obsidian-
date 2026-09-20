@@ -5680,6 +5680,7 @@ class TaskHubView extends ItemView {
   }
 
   renderCalendarSpanRows(week, tasks, dates, today, options = {}) {
+    const calendarDragEnabled = !options.mainCalendar || !!options.allowCalendarDrag;
     const rangeStart = dates[0];
     const rangeEnd = dates[6];
     const visible = tasks.filter((task) => {
@@ -5711,12 +5712,12 @@ class TaskHubView extends ItemView {
         const row = layer.createDiv({ cls: `wjq-calendar-span-task${task.completed ? " is-done" : ""}` });
         row.style.gridColumn = `${startColumn + 1} / ${endColumn + 2}`;
         row.style.gridRow = String(lanes.indexOf(items) + 1);
-        row.draggable = !task.completed && !options.mainCalendar;
+        row.draggable = !task.completed && calendarDragEnabled;
         row.dataset.calendarTaskId = task.taskId || task.runtimeId || "";
         row.dataset.calendarDate = dates[startColumn];
         row.dataset.calendarSelectionKey = `${row.dataset.calendarTaskId}:${dates[startColumn]}`;
         row.ondragstart = (event) => {
-          if (options.mainCalendar) return;
+          if (!calendarDragEnabled) return;
           const dragId = task.runtimeId || task.taskId;
           if (!dragId || !event.dataTransfer) return;
           event.dataTransfer.setData("application/x-wjq-task", dragId);
@@ -5748,14 +5749,16 @@ class TaskHubView extends ItemView {
       const header = cell.createDiv({ cls: "wjq-calendar-month-cell-header" });
       header.createSpan({ cls: "wjq-calendar-month-day-number", text: `${date.slice(5)}` });
       this.attachContextMenu(cell, [{ title: "新增任务", icon: "plus", callback: () => this.plugin.openSidebarNewTaskFromSelection(this.calendarNewTaskDefaults(date)) }]);
-      if (!options.mainCalendar) {
-        cell.ondragover = (event) => { event.preventDefault(); cell.addClass("is-drop-target"); };
-        cell.ondragleave = () => cell.removeClass("is-drop-target");
-        cell.ondrop = async (event) => { event.preventDefault(); cell.removeClass("is-drop-target"); await this.handleCalendarDrop(event, tasks, date); };
-      }
+      cell.ondragover = (event) => {
+        event.preventDefault();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+        cell.addClass("is-drop-target");
+      };
+      cell.ondragleave = () => cell.removeClass("is-drop-target");
+      cell.ondrop = async (event) => { event.preventDefault(); cell.removeClass("is-drop-target"); await this.handleCalendarDrop(event, tasks, date); };
     }
     const dates = Array.from({ length: 7 }, (_, index) => localDateString(addDays(monday, index)));
-    this.renderCalendarSpanRows(week, tasks, dates, today, options);
+    this.renderCalendarSpanRows(week, tasks, dates, today, { ...options, allowCalendarDrag: true });
   }
   calendarTaskRangeLabel(task) {
     if (!task) return "";
@@ -7834,7 +7837,7 @@ class WorkbenchHomeView extends TaskHubView {
     const collapsed = (this.plugin.settings.homeTreeCollapsed || []).includes(task.runtimeId);
     const disclosure = row.createEl("button", { cls: "wjq-home-tree-disclosure", attr: { title: children.length ? (collapsed ? "展开下级任务" : "收起下级任务") : "没有下级任务" } });
     disclosure.disabled = !children.length;
-    setIcon(disclosure, children.length ? (collapsed ? "chevron-right" : "chevron-down") : "minus");
+    disclosure.createSpan({ cls: `wjq-disclosure-glyph ${children.length ? (collapsed ? "is-right" : "is-down") : "is-leaf"}`, attr: { "aria-hidden": "true" } });
     disclosure.onclick = (event) => {
       event.stopPropagation();
       if (!children.length) return;
@@ -7916,7 +7919,7 @@ class WorkbenchHomeView extends TaskHubView {
     const collapsed = !searching && this.calendarCollapsedProjects.has(project);
     const row = parent.createDiv({ cls: `wjq-calendar-project-tree-row${collapsed ? " is-collapsed" : ""}` });
     const disclosure = row.createEl("button", { cls: "wjq-home-tree-disclosure", attr: { title: collapsed ? "展开项目任务" : "收起项目任务" } });
-    setIcon(disclosure, collapsed ? "chevron-right" : "chevron-down");
+    disclosure.createSpan({ cls: `wjq-disclosure-glyph ${collapsed ? "is-right" : "is-down"}`, attr: { "aria-hidden": "true" } });
     disclosure.onclick = (event) => {
       event.stopPropagation();
       if (this.calendarCollapsedProjects.has(project)) this.calendarCollapsedProjects.delete(project);
@@ -7938,7 +7941,7 @@ class WorkbenchHomeView extends TaskHubView {
     this.makeTaskDraggable(row, task);
     const disclosure = row.createEl("button", { cls: "wjq-home-tree-disclosure", attr: { title: children.length ? (collapsed ? "展开下级任务" : "收起下级任务") : "没有下级任务" } });
     disclosure.disabled = !children.length;
-    setIcon(disclosure, children.length ? (collapsed ? "chevron-right" : "chevron-down") : "minus");
+    disclosure.createSpan({ cls: `wjq-disclosure-glyph ${children.length ? (collapsed ? "is-right" : "is-down") : "is-leaf"}`, attr: { "aria-hidden": "true" } });
     disclosure.onclick = (event) => {
       event.stopPropagation();
       if (!children.length) return;
