@@ -488,7 +488,7 @@ class WjqTaskHubPlugin extends Plugin {
     this.settings.archivedProjects = this.settings.archivedProjects || [];
     this.settings.recentOpenedPaths = this.settings.recentOpenedPaths || [];
     this.settings.quickMemos = Array.isArray(this.settings.quickMemos) ? this.settings.quickMemos : [];
-    this.settings.sidebarExecutionRange = ["week", "future3", "future7"].includes(this.settings.sidebarExecutionRange)
+    this.settings.sidebarExecutionRange = ["week", "previousWeek", "future3", "future7"].includes(this.settings.sidebarExecutionRange)
       ? this.settings.sidebarExecutionRange
       : DEFAULT_SETTINGS.sidebarExecutionRange;
     this.settings.sidebarShowCompletedExecution = !!this.settings.sidebarShowCompletedExecution;
@@ -2534,8 +2534,10 @@ class WjqTaskHubPlugin extends Plugin {
     return true;
   }
 
-  async updateStructuredTask(task, data) {
+  async updateStructuredTask(task, data, options = {}) {
     const title = (data.title || "").trim();
+    const previousProject = task && task.projects && task.projects[0] ? task.projects[0] : "";
+    const projectChanged = !options.skipProjectSync && data.project !== undefined && String(data.project || "").trim() !== previousProject;
     data.due = normalizeDateInput(data.due);
     data.deadline = normalizeDateInput(data.deadline);
     data.hardDeadline = normalizeDateInput(data.hardDeadline || data.hard_deadline || "");
@@ -2619,10 +2621,11 @@ class WjqTaskHubPlugin extends Plugin {
           parentId: updated ? updated.id : taskId,
         });
       }
-      new Notice("已更新任务");
+      if (!options.silent) new Notice("已更新任务");
       if (parentId) await this.reopenParentChainForOpenChild(parentId);
       if (childTitles.length && (updated && updated.id)) await this.reopenParentChainForOpenChild(updated.id);
       await this.refreshViews();
+      if (projectChanged && updated && updated.id) await this.syncDescendantProjects(updated.id, data.project);
       if (updated && updated.completed) await this.autoCompleteParentChainForTaskId(updated.id);
       return true;
     }
@@ -2675,9 +2678,10 @@ class WjqTaskHubPlugin extends Plugin {
       if (data.outputDraft !== undefined) metadata.output_draft = String(data.outputDraft || "").trim();
       lines[index] = hiddenTaskComment(metadata);
       await this.app.vault.modify(file, lines.join("\n"));
-      new Notice("已更新任务");
+      if (!options.silent) new Notice("已更新任务");
       if (parentId) await this.reopenParentChainForOpenChild(parentId);
       await this.refreshViews();
+      if (projectChanged && metadata.id) await this.syncDescendantProjects(metadata.id, data.project);
       if (hiddenCompletedByData && metadata.id) await this.autoCompleteParentChainForTaskId(metadata.id);
       return true;
     }
@@ -2728,10 +2732,11 @@ class WjqTaskHubPlugin extends Plugin {
     const childLines = childTitles.map((child) => `${task.indent || ""}  ${this.formatTaskLine(child, data.project, "", "待开始", { parentId: metadata.id })}`);
     lines.splice(index, 1, formatted, ...childLines);
     await this.app.vault.modify(file, lines.join("\n"));
-    new Notice("已更新任务");
+    if (!options.silent) new Notice("已更新任务");
     if (parentId) await this.reopenParentChainForOpenChild(parentId);
     if (childTitles.length && metadata.id) await this.reopenParentChainForOpenChild(metadata.id);
     await this.refreshViews();
+    if (projectChanged && metadata.id) await this.syncDescendantProjects(metadata.id, data.project);
     if (completedByData && metadata.id) await this.autoCompleteParentChainForTaskId(metadata.id);
     return true;
   }
@@ -4008,10 +4013,49 @@ class WjqTaskHubPlugin extends Plugin {
     new Notice("已保存任务日期");
   }
 
+  async syncDescendantProjects(rootId, project) {
+    const name = String(project || "").trim();
+    if (!rootId || !name) return 0;
+    const latest = await this.scanTasks();
+    const byParent = new Map();
+    for (const item of latest) {
+      if (!item.parentId) continue;
+      if (!byParent.has(item.parentId)) byParent.set(item.parentId, []);
+      byParent.get(item.parentId).push(item);
+    }
+    const queue = [...(byParent.get(rootId) || [])];
+    const seen = new Set();
+    let synced = 0;
+    while (queue.length) {
+      const child = queue.shift();
+      if (!child || !child.taskId || seen.has(child.taskId)) continue;
+      seen.add(child.taskId);
+      await this.updateStructuredTask(child, {
+        title: child.displayText || child.text,
+        project: name,
+        due: child.due || "",
+        deadline: child.deadline || "",
+        hardDeadline: child.hardDeadline || "",
+        status: taskStatusText(child) || "待开始",
+        progress: child.progress || "",
+        priority: child.priority || "",
+        parentId: child.parentId || "",
+        blockedBy: child.blockedBy || "",
+        recordDates: child.recordDates || [],
+        completedAt: child.completedAt || "",
+        canceledAt: child.canceledAt || "",
+        childDraft: "",
+      }, { silent: true, skipProjectSync: true });
+      synced += 1;
+      queue.push(...(byParent.get(child.taskId) || []));
+    }
+    return synced;
+  }
+
   async setTaskProject(task, project) {
     const name = String(project || "").trim();
     if (!task || !name || name === "全部" || name === "鍏ㄩ儴") return;
-    await this.updateStructuredTask(task, {
+    const saved = await this.updateStructuredTask(task, {
       title: task.displayText || task.text,
       project: name,
       due: task.due || "",
@@ -4027,7 +4071,9 @@ class WjqTaskHubPlugin extends Plugin {
       canceledAt: task.canceledAt || "",
       childDraft: "",
     });
+    if (!saved) return false;
     new Notice(`已移动到项目：${name}`);
+    return true;
   }
 
   async moveTaskSchedule(task, due) {
@@ -4317,15 +4363,21 @@ class TaskHubView extends ItemView {
     const executionHeader = execution.createDiv({ cls: "wjq-sidebar-final-header" });
     executionHeader.createDiv({ cls: "wjq-sidebar-progress-title", text: "执行周历" });
     const nav = executionHeader.createDiv({ cls: "wjq-sidebar-final-nav" });
-    const range = ["week", "future3", "future7"].includes(this.plugin.settings.sidebarExecutionRange) ? this.plugin.settings.sidebarExecutionRange : "future7";
-    for (const [key, label] of [["week", "本周"], ["future7", "七天"], ["future3", "三天"]]) {
-      const button = this.createButton(nav, label, async () => {
-        this.plugin.settings.sidebarExecutionRange = key;
-        await this.plugin.saveSettings();
-        this.renderSafely();
-      });
-      if (range === key) button.addClass("is-active");
-    }
+    const range = ["week", "previousWeek", "future3", "future7"].includes(this.plugin.settings.sidebarExecutionRange) ? this.plugin.settings.sidebarExecutionRange : "future7";
+    const rangeLabels = { week: "本周", previousWeek: "上周", future3: "三天", future7: "七天" };
+    const rangeButton = this.createButton(nav, rangeLabels[range], (event) => {
+      const menu = new Menu();
+      for (const [key, label] of Object.entries(rangeLabels)) {
+        menu.addItem((item) => item.setTitle(label).setChecked(range === key).onClick(async () => {
+          this.plugin.settings.sidebarExecutionRange = key;
+          await this.plugin.saveSettings();
+          this.renderSafely();
+        }));
+      }
+      const rect = event.currentTarget.getBoundingClientRect();
+      menu.showAtPosition({ x: rect.left, y: rect.bottom + 4 });
+    });
+    rangeButton.addClass("is-active");
     const completedButton = this.createButton(nav, this.plugin.settings.sidebarShowCompletedExecution ? "隐藏" : "显示", async () => {
       this.plugin.settings.sidebarShowCompletedExecution = !this.plugin.settings.sidebarShowCompletedExecution;
       await this.plugin.saveSettings();
@@ -4352,9 +4404,11 @@ class TaskHubView extends ItemView {
 
   sidebarFinalExecutionDates(range) {
     const today = parseLocalDate(localDateString()) || new Date();
-    if (range === "week") {
+    if (range === "week" || range === "previousWeek") {
       const monday = addDays(today, -((today.getDay() + 6) % 7));
-      return datesBetween(localDateString(monday), localDateString(addDays(monday, 6)));
+      const offset = range === "previousWeek" ? -7 : 0;
+      const start = addDays(monday, offset);
+      return datesBetween(localDateString(start), localDateString(addDays(start, 6)));
     }
     const days = range === "future3" ? 3 : 7;
     return datesBetween(localDateString(today), localDateString(addDays(today, days - 1)));
@@ -4372,7 +4426,10 @@ class TaskHubView extends ItemView {
     const wrap = parent.createDiv({ cls: "wjq-sidebar-final-days" });
     for (const date of dates) {
       const day = wrap.createDiv({ cls: `wjq-sidebar-final-day ${date === localDateString() ? "is-today" : ""}` });
-      day.createDiv({ cls: "wjq-sidebar-final-day-title", text: `${date === localDateString() ? "今天" : date.slice(5)} · ${["日", "一", "二", "三", "四", "五", "六"][(parseLocalDate(date) || new Date()).getDay()]}` });
+      const dateParts = date.split("-");
+      const weekday = ["日", "一", "二", "三", "四", "五", "六"][(parseLocalDate(date) || new Date()).getDay()];
+      const dateLabel = date === localDateString() ? "今天" : `${Number(dateParts[1])}.${Number(dateParts[2])}`;
+      day.createDiv({ cls: "wjq-sidebar-final-day-title", text: `${dateLabel} 周${weekday}` });
       const tasks = this.tasks.filter((task) => {
         if (!this.isCalendarTask(task)) return false;
         const showCompleted = !!this.plugin.settings.sidebarShowCompletedExecution;
@@ -4792,13 +4849,8 @@ class TaskHubView extends ItemView {
   }
 
   isCalendarTask(task) {
-    const hasExecutionHistory = !!task && (
-      (Array.isArray(task.executionRecords) && task.executionRecords.length > 0)
-      || (Array.isArray(task.recordDates) && task.recordDates.length > 0)
-      || (Array.isArray(task.recordNotes) && task.recordNotes.length > 0)
-    );
     return !!task
-      && (!!task.due || !!task.completedAt || hasExecutionHistory)
+      && (!!task.due || !!task.completedAt)
       && !this.taskHasOpenDescendants(task);
   }
 
@@ -5498,7 +5550,7 @@ class TaskHubView extends ItemView {
     const section = container.createDiv({ cls: "wjq-task-hub-section" });
     this.renderCalendarShell(
       section,
-      this.tasks.filter((item) => this.isCalendarTask(item) && this.matchesProjectAndSearch(item) && !(this.plugin.settings.homeHideCompleted && item.completed && !((Array.isArray(item.executionRecords) && item.executionRecords.length) || (Array.isArray(item.recordDates) && item.recordDates.length) || (Array.isArray(item.recordNotes) && item.recordNotes.length))))
+      this.tasks.filter((item) => this.isCalendarTask(item) && this.matchesProjectAndSearch(item) && !(this.plugin.settings.homeHideCompleted && item.completed))
     );
   }
 
@@ -5577,12 +5629,13 @@ class TaskHubView extends ItemView {
     title.onclick = () => this.openTaskByDefault(task);
     this.attachContextMenu(row, this.taskContextActions(task, options.mainCalendar ? {} : { calendarDate: date }));
   }
-  async handleCalendarDrop(event, tasks, date) {
+  async handleCalendarDrop(event, tasks, date, options = {}) {
     const id = event.dataTransfer && (event.dataTransfer.getData("application/x-wjq-task") || event.dataTransfer.getData("text/plain"));
     const dragged = tasks.find((item) => item.taskId === id || item.runtimeId === id) || this.tasks.find((item) => item.taskId === id || item.runtimeId === id);
     if (!dragged) return;
     const sourceDate = event.dataTransfer.getData("application/x-wjq-calendar-date");
-    if (sourceDate) await this.plugin.moveCalendarPlan(dragged, sourceDate, date);
+    if (options.mainCalendar) await this.plugin.moveTaskSchedule(dragged, date);
+    else if (sourceDate) await this.plugin.moveCalendarPlan(dragged, sourceDate, date);
     else await this.plugin.createExecutionRecord(dragged, date);
   }
 
@@ -5669,13 +5722,13 @@ class TaskHubView extends ItemView {
         const header = cell.createDiv({ cls: "wjq-calendar-month-cell-header" });
         header.createSpan({ cls: "wjq-calendar-month-day-number", text: String(Number(date.slice(-2))) });
         this.attachContextMenu(cell, [{ title: "新增任务", icon: "plus", callback: () => this.plugin.openSidebarNewTaskFromSelection(this.calendarNewTaskDefaults(date)) }]);
-        if (!options.mainCalendar) {
+        if (options.allowCalendarDrag !== false) {
           cell.ondragover = (event) => { event.preventDefault(); cell.addClass("is-drop-target"); };
           cell.ondragleave = () => cell.removeClass("is-drop-target");
-          cell.ondrop = async (event) => { event.preventDefault(); cell.removeClass("is-drop-target"); await this.handleCalendarDrop(event, tasks, date); };
+          cell.ondrop = async (event) => { event.preventDefault(); cell.removeClass("is-drop-target"); await this.handleCalendarDrop(event, tasks, date, options); };
         }
       }
-      this.renderCalendarSpanRows(week, tasks, dates, today, options);
+      this.renderCalendarSpanRows(week, tasks, dates, today, { ...options, allowCalendarDrag: !!options.mainCalendar });
     }
   }
 
@@ -5725,6 +5778,30 @@ class TaskHubView extends ItemView {
           event.dataTransfer.setData("application/x-wjq-calendar-date", dates[startColumn]);
           event.dataTransfer.effectAllowed = "move";
         };
+        if (options.mainCalendar && calendarDragEnabled && !task.completed) {
+          const resizeHandle = row.createSpan({ cls: "wjq-calendar-span-resize-handle", attr: { title: "拖动调整计划完成日期", "aria-label": "拖动调整计划完成日期" } });
+          resizeHandle.onpointerdown = (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const startDate = this.calendarTaskStartDate(task);
+            if (!startDate) return;
+            const originalEnd = this.calendarTaskEndDate(task) || startDate;
+            let nextDate = originalEnd;
+            const onMove = (moveEvent) => {
+              nextDate = this.calendarDateFromWeekPointer(moveEvent, dates[0], week);
+              if (nextDate < startDate) nextDate = startDate;
+              row.dataset.resizeDate = nextDate;
+            };
+            const onUp = async () => {
+              window.removeEventListener("pointermove", onMove);
+              window.removeEventListener("pointerup", onUp);
+              row.removeAttribute("data-resize-date");
+              if (nextDate !== originalEnd) await this.plugin.setTaskSchedule(task, startDate, nextDate);
+            };
+            window.addEventListener("pointermove", onMove);
+            window.addEventListener("pointerup", onUp, { once: true });
+          };
+        }
         const checkbox = row.createEl("input", { attr: { type: "checkbox", title: "完成任务" } });
         checkbox.checked = !!task.completed;
         checkbox.onchange = () => this.plugin.toggleTask(task, checkbox.checked);
@@ -5741,10 +5818,16 @@ class TaskHubView extends ItemView {
     const today = localDateString();
     const board = parent.createDiv({ cls: "wjq-calendar-month-board wjq-calendar-week-board" });
     const weekdays = board.createDiv({ cls: "wjq-calendar-month-weekdays" });
-    for (const label of ["一", "二", "三", "四", "五", "六", "日"]) weekdays.createDiv({ cls: "wjq-calendar-month-weekday", text: label });
+    const dates = Array.from({ length: 7 }, (_, index) => localDateString(addDays(monday, index)));
+    for (const date of dates) {
+      const parts = date.split("-");
+      const weekday = ["日", "一", "二", "三", "四", "五", "六"][(parseLocalDate(date) || new Date()).getDay()];
+      const label = date === today ? "今天" : `${Number(parts[1])}.${Number(parts[2])}`;
+      weekdays.createDiv({ cls: "wjq-calendar-month-weekday", text: `${label} 周${weekday}` });
+    }
     const week = board.createDiv({ cls: "wjq-calendar-month-week" });
     for (let index = 0; index < 7; index += 1) {
-      const date = localDateString(addDays(monday, index));
+      const date = dates[index];
       const cell = week.createDiv({ cls: `wjq-calendar-month-cell${date === today ? " is-today" : ""}` });
       const header = cell.createDiv({ cls: "wjq-calendar-month-cell-header" });
       header.createSpan({ cls: "wjq-calendar-month-day-number", text: `${date.slice(5)}` });
@@ -5755,9 +5838,8 @@ class TaskHubView extends ItemView {
         cell.addClass("is-drop-target");
       };
       cell.ondragleave = () => cell.removeClass("is-drop-target");
-      cell.ondrop = async (event) => { event.preventDefault(); cell.removeClass("is-drop-target"); await this.handleCalendarDrop(event, tasks, date); };
+      cell.ondrop = async (event) => { event.preventDefault(); cell.removeClass("is-drop-target"); await this.handleCalendarDrop(event, tasks, date, options); };
     }
-    const dates = Array.from({ length: 7 }, (_, index) => localDateString(addDays(monday, index)));
     this.renderCalendarSpanRows(week, tasks, dates, today, { ...options, allowCalendarDrag: true });
   }
   calendarTaskRangeLabel(task) {
@@ -5838,10 +5920,10 @@ class TaskHubView extends ItemView {
     } else if (options.calendarDate && options.singleDay) {
       actions.push({ title: "完成任务", icon: "check", callback: () => this.plugin.completeTask(task, options.calendarDate) });
     } else if (options.calendarDate && !options.completeDate) {
-      actions.push({ title: "完成本次执行", icon: "calendar-check", callback: () => this.plugin.setExecutionRecordProgress(task, options.calendarDate, true) });
+      actions.push({ title: "已执行并记录", icon: "calendar-check", callback: () => new ExecutionRecordModal(this.plugin, task, options.calendarDate).open() });
     }
     if (!isCompleted && options.completeDate) {
-      actions.push({ title: "完成本次执行", icon: "calendar-check", callback: () => this.plugin.setExecutionRecordProgress(task, options.completeDate, true) });
+      actions.push({ title: "已执行并记录", icon: "calendar-check", callback: () => new ExecutionRecordModal(this.plugin, task, options.completeDate).open() });
     }
     const executionDate = options.calendarDate || this.taskExecutionContextDate(task);
     if (!isCompleted && executionDate && !options.singleDay) {
@@ -5864,7 +5946,6 @@ class TaskHubView extends ItemView {
       actions.push({ title: "计划今天执行", icon: "calendar-check", callback: () => this.plugin.createExecutionRecord(task, localDateString()) });
       actions.push({ title: "设置推进日期", icon: "calendar-days", callback: () => new ExecutionDatesModal(this.plugin, task).open() });
       actions.push({ title: "设置任务日期", icon: "calendar", callback: () => new DateModal(this.plugin, task).open() });
-      actions.push({ title: "记录推进", icon: "message-square-plus", callback: () => new ProgressRecordModal(this.plugin, task).open() });
     }
     actions.push({ separator: true });
     actions.push({ title: "编辑任务", icon: "settings-2", callback: () => this.plugin.activateTaskDetailView(task) });
@@ -7584,39 +7665,14 @@ class WorkbenchHomeView extends TaskHubView {
       });
     }
 
-    const filters = section.createDiv({ cls: "wjq-home-global-filters" });
-    if (!options.lockProject) {
-      const projectSelect = filters.createEl("select", { cls: "wjq-task-hub-select" });
-      for (const project of this.allProjects()) {
-        const option = projectSelect.createEl("option", { text: project, value: project });
-        option.selected = project === this.project;
-      }
-      projectSelect.onchange = () => this.setHomeProject(projectSelect.value);
-    } else {
-      filters.createDiv({ cls: "wjq-home-filter-label", text: options.scopeLabel || `项目：${this.project}` });
-    }
-
-    const statusSelect = filters.createEl("select", { cls: "wjq-task-hub-select" });
-    for (const status of this.homeStatusOptions()) {
-      const option = statusSelect.createEl("option", { text: `状态：${status}`, value: status });
-      option.selected = status === (this.plugin.settings.homeStatusFilter || "全部");
-    }
-    statusSelect.onchange = () => this.setHomeFilterSetting("homeStatusFilter", statusSelect.value);
-
-    const levelSelect = filters.createEl("select", { cls: "wjq-task-hub-select" });
-    for (const level of ["全部", "1", "2", "3", "4", "5+"]) {
-      const option = levelSelect.createEl("option", { text: `层级：${level}`, value: level });
-      option.selected = level === (this.plugin.settings.homeLevelFilter || "全部");
-    }
-    levelSelect.onchange = () => this.setHomeFilterSetting("homeLevelFilter", levelSelect.value);
-
-    const taskSearch = filters.createEl("input", {
+    const taskSearch = tabs.createEl("input", {
       cls: "wjq-home-filter-search",
       attr: { type: "search", placeholder: "搜索当前视图任务" },
     });
     taskSearch.value = this.plugin.settings.homeTaskSearch || "";
     taskSearch.onchange = () => this.setHomeFilterSetting("homeTaskSearch", taskSearch.value);
 
+    const filters = section.createDiv({ cls: "wjq-home-global-filters" });
     const hideDoneLabel = filters.createEl("label", { cls: "wjq-home-filter-check" });
     const hideDone = hideDoneLabel.createEl("input", { attr: { type: "checkbox" } });
     hideDone.checked = !!this.plugin.settings.homeHideCompleted;
@@ -7625,8 +7681,6 @@ class WorkbenchHomeView extends TaskHubView {
 
     this.createButton(filters, "清除筛选", () => {
       this.search = "";
-      this.plugin.settings.homeStatusFilter = "全部";
-      this.plugin.settings.homeLevelFilter = "全部";
       this.plugin.settings.homeTaskSearch = "";
       this.plugin.settings.homeHideCompleted = false;
       this.setHomeProject("全部");
@@ -7674,19 +7728,11 @@ class WorkbenchHomeView extends TaskHubView {
 
   homeGlobalTasks() {
     const base = this.homeScopedTasks().filter((task) => !/取消|归档/.test(taskStatusText(task)));
-    const depths = this.taskDepthMap(base);
-    const statusFilter = this.plugin.settings.homeStatusFilter || "全部";
-    const levelFilter = this.plugin.settings.homeLevelFilter || "全部";
     const taskSearch = String(this.plugin.settings.homeTaskSearch || "").trim().toLowerCase();
     return base
       .filter((task) => {
         if (this.plugin.settings.homeHideCompleted && task.completed) return false;
-        const status = taskStatusText(task) || "待开始";
-        if (statusFilter !== "全部" && status !== statusFilter) return false;
         if (taskSearch && !`${task.displayText || task.text} ${task.projects.join(" ")} ${task.path}`.toLowerCase().includes(taskSearch)) return false;
-        const depth = depths.get(task.runtimeId) || 1;
-        if (levelFilter === "5+") return depth >= 5;
-        if (levelFilter !== "全部" && depth !== Number(levelFilter)) return false;
         return true;
       })
       .sort((a, b) => {
@@ -7871,7 +7917,7 @@ class WorkbenchHomeView extends TaskHubView {
     const treeHost = taskPane.createDiv({ cls: "wjq-home-calendar-task-tree" });
     const renderTasks = () => {
       treeHost.empty();
-      const allTasks = this.homeGlobalTasks().filter((task) => !task.completed);
+      const allTasks = this.homeGlobalTasks();
       const query = String(this.calendarTaskSearch || "").trim().toLowerCase();
       const visible = query
         ? allTasks.filter((task) => `${task.displayText || task.text} ${(task.projects || []).join(" ")}`.toLowerCase().includes(query))
@@ -7909,7 +7955,7 @@ class WorkbenchHomeView extends TaskHubView {
     const calendarPane = layout.createDiv({ cls: "wjq-home-calendar-pane" });
     const scopedTasks = this.homeGlobalTasks().filter((item) => {
       if (this.plugin.settings.homeHideCompleted && item.completed) return false;
-      return !!(item.due || item.deadline || item.plannedAt || item.completedAt);
+      return this.isCalendarTask(item);
     });
     this.renderCalendarShell(calendarPane, scopedTasks, { mainCalendar: true });
   }
@@ -9821,6 +9867,45 @@ class ProgressRecordModal extends Modal {
       open = true;
       renderResults();
     };
+  }
+
+  onClose() {
+    this.contentEl.empty();
+  }
+}
+
+class ExecutionRecordModal extends Modal {
+  constructor(plugin, task, date) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.task = task;
+    this.date = date || localDateString();
+    this.note = "";
+  }
+
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h2", { text: "已执行并记录" });
+    contentEl.createDiv({ cls: "wjq-task-hub-modal-task", text: `${this.task.displayText || this.task.text} · ${this.date}` });
+    new Setting(contentEl)
+      .setName("执行说明")
+      .setDesc("记录这次执行完成了什么，可留空。")
+      .addTextArea((area) => {
+        area.inputEl.rows = 4;
+        area.setPlaceholder("例如：完成文献综述第一轮整理");
+        area.setValue(this.note);
+        area.onChange((value) => (this.note = value));
+        setTimeout(() => area.inputEl.focus(), 50);
+      });
+    const footer = contentEl.createDiv({ cls: "wjq-task-hub-modal-actions" });
+    const save = footer.createEl("button", { text: "保存" });
+    save.addClass("mod-cta");
+    save.onclick = async () => {
+      await this.plugin.setExecutionRecordProgress(this.task, this.date, true, this.note);
+      this.close();
+    };
+    footer.createEl("button", { text: "取消" }).onclick = () => this.close();
   }
 
   onClose() {
