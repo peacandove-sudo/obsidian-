@@ -5778,7 +5778,7 @@ class TaskHubView extends ItemView {
           event.dataTransfer.setData("application/x-wjq-calendar-date", dates[startColumn]);
           event.dataTransfer.effectAllowed = "move";
         };
-        if (options.mainCalendar && calendarDragEnabled && !task.completed) {
+        if (options.mainCalendar && calendarDragEnabled && !task.completed && this.calendarTaskEndDate(task) <= dates[6]) {
           const resizeHandle = row.createSpan({ cls: "wjq-calendar-span-resize-handle", attr: { title: "拖动调整计划完成日期", "aria-label": "拖动调整计划完成日期" } });
           resizeHandle.onpointerdown = (event) => {
             event.preventDefault();
