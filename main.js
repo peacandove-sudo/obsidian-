@@ -7672,19 +7672,13 @@ class WorkbenchHomeView extends TaskHubView {
     taskSearch.value = this.plugin.settings.homeTaskSearch || "";
     taskSearch.onchange = () => this.setHomeFilterSetting("homeTaskSearch", taskSearch.value);
 
-    const filters = section.createDiv({ cls: "wjq-home-global-filters" });
-    const hideDoneLabel = filters.createEl("label", { cls: "wjq-home-filter-check" });
-    const hideDone = hideDoneLabel.createEl("input", { attr: { type: "checkbox" } });
-    hideDone.checked = !!this.plugin.settings.homeHideCompleted;
-    hideDone.onchange = () => this.setHomeFilterSetting("homeHideCompleted", hideDone.checked);
-    hideDoneLabel.createSpan({ text: "隐藏已完成" });
-
-    this.createButton(filters, "清除筛选", () => {
-      this.search = "";
-      this.plugin.settings.homeTaskSearch = "";
-      this.plugin.settings.homeHideCompleted = false;
-      this.setHomeProject("全部");
-    });
+    if (currentView === "calendar") {
+      const hideDoneLabel = tabs.createEl("label", { cls: "wjq-home-filter-check wjq-home-calendar-hide-completed" });
+      const hideDone = hideDoneLabel.createEl("input", { attr: { type: "checkbox" } });
+      hideDone.checked = !!this.plugin.settings.homeHideCompleted;
+      hideDone.onchange = () => this.setHomeFilterSetting("homeHideCompleted", hideDone.checked);
+      hideDoneLabel.createSpan({ text: "不显示已完成" });
+    }
 
     const view = currentView;
     const body = section.createDiv({ cls: `wjq-home-global-body ${["calendar", "flow"].includes(view) ? `is-${view}` : ""}` });
@@ -7731,7 +7725,6 @@ class WorkbenchHomeView extends TaskHubView {
     const taskSearch = String(this.plugin.settings.homeTaskSearch || "").trim().toLowerCase();
     return base
       .filter((task) => {
-        if (this.plugin.settings.homeHideCompleted && task.completed) return false;
         if (taskSearch && !`${task.displayText || task.text} ${task.projects.join(" ")} ${task.path}`.toLowerCase().includes(taskSearch)) return false;
         return true;
       })
@@ -7917,7 +7910,9 @@ class WorkbenchHomeView extends TaskHubView {
     const treeHost = taskPane.createDiv({ cls: "wjq-home-calendar-task-tree" });
     const renderTasks = () => {
       treeHost.empty();
-      const allTasks = this.homeGlobalTasks();
+      const allTasks = this.homeScopedTasks()
+        .filter((task) => !/取消|归档/.test(taskStatusText(task)))
+        .filter((task) => !task.completed);
       const query = String(this.calendarTaskSearch || "").trim().toLowerCase();
       const visible = query
         ? allTasks.filter((task) => `${task.displayText || task.text} ${(task.projects || []).join(" ")}`.toLowerCase().includes(query))
@@ -7953,10 +7948,12 @@ class WorkbenchHomeView extends TaskHubView {
     this.renderHomeCalendarResizer(layout);
 
     const calendarPane = layout.createDiv({ cls: "wjq-home-calendar-pane" });
-    const scopedTasks = this.homeGlobalTasks().filter((item) => {
-      if (this.plugin.settings.homeHideCompleted && item.completed) return false;
-      return this.isCalendarTask(item);
-    });
+    const scopedTasks = this.homeScopedTasks()
+      .filter((item) => !/取消|归档/.test(taskStatusText(item)))
+      .filter((item) => {
+        if (this.plugin.settings.homeHideCompleted && item.completed) return false;
+        return this.isCalendarTask(item);
+      });
     this.renderCalendarShell(calendarPane, scopedTasks, { mainCalendar: true });
   }
 

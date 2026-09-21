@@ -1494,6 +1494,10 @@
   white-space: nowrap;
 }
 
+.wjq-home-calendar-hide-completed {
+  margin-left: 2px;
+}
+
 .wjq-home-global-body {
   max-height: none;
   overflow: visible;
